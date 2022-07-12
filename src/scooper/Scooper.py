@@ -13,11 +13,13 @@ from threading import (
 from proton.reactor import Container
 from seleniumwire import webdriver
 from seleniumwire.webdriver import ChromeOptions
-from browsermobproxy import Server
 
 sys.path.append("..")
 from utils.Headers import Headers
 from scoop_exception.ScoopException import ScoopException
+from scoop_exception.RegistryEarlyRotationException import (
+  RegistryEarlyRotationException
+)
 from scooper.ScooperState import SCOOPER_STATE
 from registry.Registry import Registry
 from outpout.Output import Output
@@ -84,31 +86,28 @@ class Scooper:
     self.registries.append(registry)
     return self
 
-## TODO :: add signal interruption to clean things up nicely on shutdown
-## TODO ::
   @final
   def pull(self):
     while self.state is not SCOOPER_STATE.SHUTTING_DOWN:
       current_registry = self.rotation_strategy(self.registries)
       if current_registry:
-        if not current_registry.is_up_to_date(): # not very graceful, but required to only transition states once
-          self.transition_to_state(SCOOPER_STATE.ENTRY_POINT_PRE)
-          self.browser.get(current_registry.entry_point)
-          self.transition_to_state(SCOOPER_STATE.ENTRY_POINT)
+        try:
           while not current_registry.is_up_to_date():
-            target = current_registry.get_target(self.browser)
-            for output in self.outputs:
-              output.send(target)
+            target, target_is_ready = current_registry.do_some_work(self.browser)
+            if target_is_ready:
+              for output in self.outputs:
+                output.send(target)
+        except RegistryEarlyRotationException:
+          pass
       else:
         raise ScoopException
 
   @final
   def transition_to_state(self, _next_state):
-    time.sleep(self.click_pattern)
-    self.state_lock.acquire()
-    self.state = _next_state
-    ### call _next_state callbacks
-    self.state_lock.release()
+    with self.state_lock:
+      time.sleep(self.click_pattern)
+      self.state = _next_state
+      ### call _next_state callbacks
 
   @final
   def stop(self):
@@ -129,8 +128,6 @@ class RotationStrategy:
     raise NotImplementedError
 
 class CircularRotationStrategy(RotationStrategy):
-  def __init__(self) -> None:
-    super().__init__()
   def __call__(self, queue) -> Registry:
     if (queue):
       cur = queue.pop()
